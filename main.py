@@ -66,7 +66,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -261,7 +261,27 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# ========== OTP Functions ==========
+# ========== Update Admin Password ==========
+def update_admin_password():
+    """Update admin password to use new hashing scheme"""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == "admin@university.edu").first()
+        if user:
+            new_hash = get_password_hash("admin123")
+            user.password_hash = new_hash
+            db.commit()
+            print("Admin password updated")
+        else:
+            print("Admin user not found")
+    except Exception as e:
+        print(f"Error updating password: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+# Call this once to update
+# update_admin_password()
 def generate_otp():
     """Generate a 6-digit OTP"""
     return ''.join(random.choices(string.digits, k=6))
