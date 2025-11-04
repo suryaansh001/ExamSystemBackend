@@ -33,8 +33,16 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 # Email Configuration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-GMAIL_USER = os.getenv("GMAIL_USER", "your-email@gmail.com")
-GMAIL_PASS = os.getenv("GMAIL_PASS", "your-app-password")
+GMAIL_USER = os.getenv("GMAIL_USER", "").strip()
+GMAIL_PASS = os.getenv("GMAIL_PASS", "").strip()
+
+# Validate email configuration on startup
+EMAIL_CONFIGURED = bool(GMAIL_USER and GMAIL_PASS and not GMAIL_USER.startswith("your-") and not GMAIL_PASS.startswith("your-"))
+if not EMAIL_CONFIGURED:
+    print("\n⚠️  WARNING: Email not configured properly!")
+    print("   GMAIL_USER and GMAIL_PASS must be set in .env file")
+    print("   OTP emails will be printed to console only")
+    print("\n")
 
 # Database setup with Neon DB support
 # Neon requires SSL/TLS connections
@@ -66,7 +74,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Password hashing
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -261,27 +269,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# ========== Update Admin Password ==========
-def update_admin_password():
-    """Update admin password to use new hashing scheme"""
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.email == "admin@university.edu").first()
-        if user:
-            new_hash = get_password_hash("admin123")
-            user.password_hash = new_hash
-            db.commit()
-            print("Admin password updated")
-        else:
-            print("Admin user not found")
-    except Exception as e:
-        print(f"Error updating password: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-# Call this once to update
-# update_admin_password()
+# ========== OTP Functions ==========
 def generate_otp():
     """Generate a 6-digit OTP"""
     return ''.join(random.choices(string.digits, k=6))
@@ -292,21 +280,26 @@ def send_otp_email(email: str, otp: str):
     Supports both testing (console output) and production (actual email sending).
     """
     try:
-        # For testing/demo: print OTP to console
+        # Always print to console for testing/debugging
         print(f"\n{'='*60}")
         print(f"OTP for {email}: {otp}")
         print(f"Expires in: 10 minutes")
         print(f"{'='*60}\n")
         
-        # For production: send actual email via Gmail SMTP
-        if GMAIL_USER and GMAIL_PASS:
-            try:
-                message = MIMEMultipart()
-                message["From"] = GMAIL_USER
-                message["To"] = email
-                message["Subject"] = "Your Paper Portal Verification Code"
-                
-                body = f"""
+        # If email is not configured properly, just use console output
+        if not EMAIL_CONFIGURED:
+            print(f"ℹ️  Email credentials not configured. OTP shown above.")
+            print(f"    Configure GMAIL_USER and GMAIL_PASS in .env to enable email sending.\n")
+            return True
+        
+        # Try to send actual email via Gmail SMTP
+        try:
+            message = MIMEMultipart()
+            message["From"] = GMAIL_USER
+            message["To"] = email
+            message["Subject"] = "Your Paper Portal Verification Code"
+            
+            body = f"""
                 <!DOCTYPE html>
                 <html lang="en">
                 <head>
@@ -481,29 +474,44 @@ def send_otp_email(email: str, otp: str):
                 </body>
                 </html>
                 """
-                
-                message.attach(MIMEText(body, "html"))
-                
-                # Send via Gmail SMTP
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                    server.starttls()
-                    server.login(GMAIL_USER, GMAIL_PASS)
-                    server.send_message(message)
-                
-                print(f"✓ Email sent successfully to {email}")
-                return True
-            except smtplib.SMTPAuthenticationError:
-                print(f"⚠ Gmail authentication failed. Check GMAIL_USER and GMAIL_PASS in .env")
-                print(f"⚠ Make sure you're using App Password (not regular Gmail password)")
-                return True
-            except Exception as e:
-                print(f"⚠ Failed to send email via Gmail: {e}")
-                print(f"⚠ Using console output only for testing")
-                return True
-        
-        return True
+            
+            message.attach(MIMEText(body, "html"))
+            
+            # Send via Gmail SMTP with timeout
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(GMAIL_USER, GMAIL_PASS)
+                server.send_message(message)
+            
+            print(f"✓ Email sent successfully to {email}")
+            return True
+            
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"❌ Gmail authentication failed: {e}")
+            print(f"   Reason: Check GMAIL_USER and GMAIL_PASS in .env")
+            print(f"   Note: Use App Password (not regular Gmail password)")
+            print(f"   Check: https://myaccount.google.com/apppasswords\n")
+            return True
+            
+        except smtplib.SMTPException as e:
+            print(f"❌ SMTP error: {e}")
+            print(f"   Note: Railway may have network restrictions. Check email configuration.\n")
+            return True
+            
+        except OSError as e:
+            print(f"❌ Network error: {e}")
+            print(f"   Note: Cannot reach Gmail SMTP server. Possible causes:")
+            print(f"   1. Network/firewall restrictions on Railway")
+            print(f"   2. SMTP_SERVER/SMTP_PORT incorrect in .env")
+            print(f"   3. Gmail credentials invalid or expired\n")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Unexpected error sending email: {type(e).__name__}: {e}\n")
+            return True
+    
     except Exception as e:
-        print(f"Error in send_otp_email: {e}")
+        print(f"❌ Critical error in send_otp_email: {type(e).__name__}: {e}\n")
         return True
 
 def get_db():
@@ -541,10 +549,22 @@ def require_admin(current_user: User = Depends(get_current_user)):
 # ========== FastAPI App ==========
 app = FastAPI(title="Paper Portal API", version="2.0.0")
 
+# Startup event to log configuration
+@app.on_event("startup")
+async def startup_event():
+    print("\n" + "="*70)
+    print("🚀 Paper Portal API Starting...")
+    print("="*70)
+    print(f"✓ Database: {'Neon DB (SSL/TLS enabled)' if 'neon.tech' in DATABASE_URL else 'PostgreSQL'}")
+    print(f"✓ Email: {'✓ Configured' if EMAIL_CONFIGURED else '❌ NOT CONFIGURED (Console output only)'}")
+    if not EMAIL_CONFIGURED:
+        print(f"  └─ Set GMAIL_USER and GMAIL_PASS in .env to enable email sending")
+    print("="*70 + "\n")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -555,6 +575,65 @@ try:
     app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 except Exception as e:
     print(f"Warning: Could not mount uploads directory: {e}")
+
+
+# ========== Health & Status Endpoints ==========
+
+@app.get("/health")
+def health_check():
+    """Check API health and configuration status"""
+    return {
+        "status": "healthy",
+        "database": "connected" if "neon.tech" in DATABASE_URL else "local",
+        "email": "configured" if EMAIL_CONFIGURED else "console_only"
+    }
+
+@app.get("/health/email")
+def email_health_check():
+    """Check email configuration and attempt connection"""
+    if not EMAIL_CONFIGURED:
+        return {
+            "status": "not_configured",
+            "message": "Email credentials not set in .env",
+            "action": "Set GMAIL_USER and GMAIL_PASS in environment variables",
+            "mode": "console_output_only"
+        }
+    
+    try:
+        # Test SMTP connection without sending email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_PASS)
+        
+        return {
+            "status": "healthy",
+            "email": GMAIL_USER,
+            "smtp_server": SMTP_SERVER,
+            "smtp_port": SMTP_PORT,
+            "message": "Email configuration verified"
+        }
+    
+    except smtplib.SMTPAuthenticationError as e:
+        return {
+            "status": "authentication_failed",
+            "email": GMAIL_USER,
+            "error": str(e),
+            "action": "Check GMAIL_USER and GMAIL_PASS, ensure App Password is used"
+        }
+    
+    except (OSError, smtplib.SMTPException) as e:
+        return {
+            "status": "connection_failed",
+            "error": str(e),
+            "action": "Check network connectivity to SMTP server",
+            "note": "Railway may have SMTP restrictions"
+        }
+    
+    except Exception as e:
+        return {
+            "status": "unknown_error",
+            "error": str(e)
+        }
 
 
 # ========== Auth Endpoints ==========
@@ -662,23 +741,18 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """Traditional login with email and password (for admins and legacy users)"""
-    print(f"Login attempt for: {form_data.username}")
     user = db.query(User).filter(User.email == form_data.username).first()
-    print(f"User found: {user is not None}")
     if not user or not verify_password(form_data.password, user.password_hash):
-        print("Authentication failed")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    print("Authentication successful, creating token")
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
-    print("Token created successfully")
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/admin-login", response_model=Token)
@@ -1060,8 +1134,8 @@ def delete_paper(paper_id: int, db: Session = Depends(get_db), admin: User = Dep
     # Delete file
     try:
         os.remove(paper.file_path)
-    except:
-        pass
+    except OSError as e:
+        print(f"Warning: Could not delete file {paper.file_path}: {e}")
     
     db.delete(paper)
     db.commit()
